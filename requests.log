@@ -1,0 +1,11 @@
+POST http://163.22.17.116/ HTTP/1.1
+Content-Length: 30
+Cache-Control: no-cache
+User-Agent: sqlmap/1.9.5#stable (https://sqlmap.org)
+Host: 163.22.17.116
+Accept: */*
+Accept-Encoding: gzip,deflate
+Content-Type: application/x-www-form-urlencoded; charset=utf-8
+Connection: close
+
+username=admin&password=secret

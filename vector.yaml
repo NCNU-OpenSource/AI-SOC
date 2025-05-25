@@ -1,0 +1,47 @@
+api:
+  enabled: true
+  address: "0.0.0.0:8686"
+
+sources:
+  nginx_logs:
+    type: file
+    include:
+      - "/var/log/nginx/access.log"
+    ignore_older: 86400
+    read_from: "end"
+
+transforms:
+  parse_nginx:
+    type: remap
+    inputs: [nginx_logs]
+    source: |
+      . = parse_grok!(
+        .message,
+        "%{IPORHOST:ip} - - \\[%{HTTPDATE:timestamp}\\] \"%{WORD:method} %{NOTSPACE:endpoint} HTTP/%{NUMBER:http_version}\" %{NUMBER:status_code} %{NUMBER:bytes_sent}"
+      )
+      .timestamp = parse_timestamp!(.timestamp, format: "%d/%b/%Y:%H:%M:%S %z")
+
+  filter_whitelist:
+    type: filter
+    inputs: [parse_nginx]
+    # 只放行 163.22.17.200
+    condition: '.ip == "10.104.36.165"'
+
+  filter_blacklist:
+    type: filter
+    inputs: [parse_nginx]
+    # 丢弃所有 400 以上的
+    condition: 'to_int!(.status_code) >= 400'
+
+sinks:
+  whitelist_console:
+    type: console
+    inputs: [filter_whitelist]
+    encoding:
+      codec: json
+
+  blacklist_console:
+    type: console
+    inputs: [filter_blacklist]
+    encoding:
+      codec: json

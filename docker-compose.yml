@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  vector:
+    image: timberio/vector:0.46.1-debian
+    container_name: vector
+    restart: always
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/log/nginx:/var/log/nginx:ro
+    ports:
+      - "8686:8686"
+    command: ["vector", "--config", "/etc/vector/vector.yaml"]
