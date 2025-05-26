@@ -23,6 +23,12 @@ transforms:
         .timestamp,
         format: "%d/%b/%Y:%H:%M:%S %z"
       )
+      # 轉換數值字段
+      .status_code = to_string!(.status_code)
+      .bytes_sent = if .bytes_sent == "-" { 0.0 } else { to_float!(.bytes_sent) }
+      .request_time = if .request_time == "-" { 0.0 } else { to_float!(.request_time) }
+      # 添加一個計數器字段
+      .request_count = 1.0
 
   # 1. 白名單：只放行指定 IP 的所有事件（不論 status）
   filter_whitelist:
@@ -36,25 +42,99 @@ transforms:
     inputs: [parse_nginx]
     condition: 'to_int!(.status_code) < 400'
 
-  # 為 Prometheus 準備指標
   prepare_metrics:
     type: remap
-    inputs: [filter_whitelist, filter_nonblacklist]
+    inputs: [parse_nginx]
     source: |
-      # 添加標籤
-      .filter_type = if .ip == "163.22.17.200" { "whitelist" } else { "nonblacklist" }
-      # 轉換狀態碼為字符串
-      .status_code = to_string!(.status_code)
-      # 轉換 bytes_sent 為數值，如果是 "-" 則設為 0
-      .bytes_sent = if .bytes_sent == "-" { 0.0 } else { to_float!(.bytes_sent) }
-      # 轉換 request_time 為數值，如果是 "-" 則設為 0
-      .request_time = if .request_time == "-" { 0.0 } else { to_float!(.request_time) }
+      # 準備共用標籤
+      .common_tags = {
+        "method": .method,
+        "status_code": .status_code,
+        "endpoint": .endpoint,
+        "ip": .ip
+      }
+      
+      # 請求計數指標
+      .metric = {
+        "name": "nginx_request",
+        "kind": "absolute",
+        "timestamp": .timestamp,
+        "gauge": {"value": 1.0},
+        "tags": .common_tags
+      }
+      
+      # 發送字節數指標
+      .bytes_metric = {
+        "name": "nginx_bytes_sent",
+        "kind": "absolute",
+        "timestamp": .timestamp,
+        "gauge": {"value": .bytes_sent},
+        "tags": .common_tags
+      }
+      
+      # 請求持續時間指標
+      .duration_metric = {
+        "name": "nginx_request_duration",
+        "kind": "absolute",
+        "timestamp": .timestamp,
+        "gauge": {"value": .request_time},
+        "tags": .common_tags
+      }
+
+  convert_metrics:
+    type: log_to_metric
+    inputs: [parse_nginx]
+    metrics:
+      - type: gauge
+        field: bytes_sent
+        name: nginx_bytes_sent
+        description: The number of bytes sent
+        tags:
+          method: "{{method}}"
+          status_code: "{{status_code}}"
+          endpoint: "{{endpoint}}"
+          ip: "{{ip}}"
+      
+      - type: gauge
+        field: request_time
+        name: nginx_request_duration_seconds
+        description: Request duration in seconds
+        tags:
+          method: "{{method}}"
+          status_code: "{{status_code}}"
+          endpoint: "{{endpoint}}"
+          ip: "{{ip}}"
+      
+      - type: counter
+        field: request_count
+        name: nginx_requests_total
+        description: Total number of HTTP requests
+        tags:
+          method: "{{method}}"
+          status_code: "{{status_code}}"
+          endpoint: "{{endpoint}}"
+          ip: "{{ip}}"
 
 sinks:
+  # 輸出解析後的原始日誌
+  console_raw:
+    type: console
+    inputs: [parse_nginx]
+    encoding:
+      codec: json
+    target: stdout
+
+  # 輸出準備好的指標數據
+  console_metrics:
+    type: console
+    inputs: [prepare_metrics]
+    encoding:
+      codec: json
+    target: stdout
+
   prometheus_metrics:
     type: prometheus_exporter
-    inputs: [prepare_metrics]
+    inputs: [convert_metrics]
     address: "0.0.0.0:9090"
     default_namespace: "nginx"
     buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-    distributions_as_summaries: false
