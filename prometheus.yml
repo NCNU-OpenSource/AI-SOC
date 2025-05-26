@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 15s #配置了 Prometheus 來抓取 Vector 的指標，每 15 秒抓取一次。
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'vector'
+    static_configs:
+      - targets: ['vector:9090']

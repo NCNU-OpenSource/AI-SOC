@@ -17,31 +17,44 @@ transforms:
     source: |
       . = parse_grok!(
         .message,
-        "%{IPORHOST:ip} - - \\[%{HTTPDATE:timestamp}\\] \"%{WORD:method} %{NOTSPACE:endpoint} HTTP/%{NUMBER:http_version}\" %{NUMBER:status_code} %{NUMBER:bytes_sent}"
+        "%{IPORHOST:ip} - - \\[%{HTTPDATE:timestamp}\\] \"%{WORD:method} %{NOTSPACE:endpoint} HTTP/%{NUMBER:http_version}\" %{NUMBER:status_code} %{NUMBER:bytes_sent} \"%{DATA:referrer}\" \"%{DATA:user_agent}\" \"%{DATA:request_time}\" \"%{DATA:upstream_addr}\""
       )
-      .timestamp = parse_timestamp!(.timestamp, format: "%d/%b/%Y:%H:%M:%S %z")
+      .timestamp = parse_timestamp!(
+        .timestamp,
+        format: "%d/%b/%Y:%H:%M:%S %z"
+      )
 
+  # 1. 白名單：只放行指定 IP 的所有事件（不論 status）
   filter_whitelist:
     type: filter
     inputs: [parse_nginx]
-    # 只放行 163.22.17.200
-    condition: '.ip == "10.104.36.165"'
+    condition: '.ip == "163.22.17.200"'
 
-  filter_blacklist:
+  # 2. 非黑名單：除了 4xx/5xx 之外的事件（不論 IP）
+  filter_nonblacklist:
     type: filter
     inputs: [parse_nginx]
-    # 丢弃所有 400 以上的
-    condition: 'to_int!(.status_code) >= 400'
+    condition: 'to_int!(.status_code) < 400'
+
+  # 為 Prometheus 準備指標
+  prepare_metrics:
+    type: remap
+    inputs: [filter_whitelist, filter_nonblacklist]
+    source: |
+      # 添加標籤
+      .filter_type = if .ip == "163.22.17.200" { "whitelist" } else { "nonblacklist" }
+      # 轉換狀態碼為字符串
+      .status_code = to_string!(.status_code)
+      # 轉換 bytes_sent 為數值，如果是 "-" 則設為 0
+      .bytes_sent = if .bytes_sent == "-" { 0.0 } else { to_float!(.bytes_sent) }
+      # 轉換 request_time 為數值，如果是 "-" 則設為 0
+      .request_time = if .request_time == "-" { 0.0 } else { to_float!(.request_time) }
 
 sinks:
-  whitelist_console:
-    type: console
-    inputs: [filter_whitelist]
-    encoding:
-      codec: json
-
-  blacklist_console:
-    type: console
-    inputs: [filter_blacklist]
-    encoding:
-      codec: json
+  prometheus_metrics:
+    type: prometheus_exporter
+    inputs: [prepare_metrics]
+    address: "0.0.0.0:9090"
+    default_namespace: "nginx"
+    buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    distributions_as_summaries: false
