@@ -1,9 +1,13 @@
 {
+  "name": "log-analysis",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Log analysis tool using OpenAI API",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
   "dependencies": {
-    "axios": "^1.9.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.5.0",
-    "express": "^5.1.0",
-    "node-cron": "^4.0.7"
+    "openai": "^4.28.0"
   }
 }

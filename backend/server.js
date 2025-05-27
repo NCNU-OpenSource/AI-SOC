@@ -29,7 +29,8 @@ if (!process.env.OPENAI_API_KEY) {
 
 // OpenAI 配置
 const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
+    baseURL: "https://openrouter.ai/api/v1",
+    apiKey: "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"
 });
 
 // 儲存最新的分析結果
@@ -108,52 +109,89 @@ function analyzeLogLine(line, lineNumber) {
 async function analyzeLogs() {
     try {
         console.log("開始分析日誌...");
-        
-        // 讀取日誌檔案
+        // 讀取 log 檔案
         const logContent = fs.readFileSync('attack_logs_apache_style.txt', 'utf8');
-        
+
+        // 檢查檔案內容是否為空
         if (!logContent.trim()) {
             throw new Error("日誌檔案內容為空");
         }
 
         const completion = await openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
-            messages: [
-                {
-                    role: "user",
-                    content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式：
-
-{
-  "is_attack": true/false,                 // 是否為攻擊行為
-  "need_test_command": true/false,        // 是否需要進一步測試命令確認
-  "shell_script": "測試命令或空字串",     // 若 need_test_command 為 true，必須提供測試命令
-  "general_response": "攻擊說明"          // 對此次攻擊的綜合描述
-}
-
-分析以下 log：
-${logContent}`
+            model: "meta-llama/llama-4-scout:free",
+            messages: [{
+                role: "user",
+                content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
+                    "is_attack": true/false, // 是否為攻擊行為
+                    "need_test_command": true/false, // 是否需要進一步測試命令確認
+                    "shell_script": "測試命令或空字串", // 若 need_test_command 為 true，必須提供測試命令
+                    "general_response": "攻擊說明" // 對此次攻擊的綜合描述
                 }
-            ]
+                注意事項：
+                1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
+                分析以下 log：
+                ${logContent}`
+            }]
         });
+
+        console.log(`收到 API 回應`);
 
         if (!completion.choices?.[0]?.message?.content) {
             throw new Error("API 回傳的資料格式不正確");
         }
 
-        const jsonMatch = completion.choices[0].message.content.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-            throw new Error("無法從 API 回應中提取 JSON 資料");
+        try {
+            const content = completion.choices[0].message.content;
+            if (!content) {
+                throw new Error("模型回應內容為空");
+            }
+
+            // 使用正則表達式提取 JSON 部分（支援陣列或物件格式）
+            const jsonMatch = content.match(/(\[|\{)[\s\S]*(\]|\})/);
+            if (jsonMatch) {
+                const jsonStr = jsonMatch[0];
+                const parsedResult = JSON.parse(jsonStr);
+
+                // 處理陣列或單一物件的結果
+                let analysisResult;
+                if (Array.isArray(parsedResult)) {
+                    // 如果是陣列，合併所有攻擊描述
+                    const isAnyAttack = parsedResult.some(item => item.is_attack);
+                    const needTestCommand = parsedResult.some(item => item.need_test_command);
+                    const shellScripts = parsedResult
+                        .filter(item => item.shell_script)
+                        .map(item => item.shell_script)
+                        .join('\n');
+                    const responses = parsedResult
+                        .map(item => item.general_response)
+                        .filter(response => response)
+                        .join('\n- ');
+
+                    analysisResult = {
+                        is_attack: isAnyAttack,
+                        need_test_command: needTestCommand,
+                        shell_script: shellScripts,
+                        general_response: responses ? `發現多個攻擊行為：\n- ${responses}` : "無攻擊行為"
+                    };
+                } else {
+                    // 如果是單一物件，直接使用
+                    analysisResult = parsedResult;
+                }
+                
+                // 更新最新分析结果
+                latestAnalysis = {
+                    timestamp: new Date(),
+                    results: analysisResult
+                };
+
+                return analysisResult;
+            } else {
+                throw new Error("無法從 API 回應中提取 JSON 資料");
+            }
+        } catch (err) {
+            console.error("JSON 解析失敗：", err);
+            throw new Error("JSON 解析失敗：" + err.message);
         }
-
-        const analysisResult = JSON.parse(jsonMatch[0]);
-        
-        // 更新最新分析结果
-        latestAnalysis = {
-            timestamp: new Date(),
-            results: analysisResult
-        };
-
-        return analysisResult;
     } catch (error) {
         console.error("分析日誌時發生錯誤：", error);
         throw error;
