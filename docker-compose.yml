@@ -11,6 +11,7 @@ services:
     ports:
       - "8686:8686"   # Vector API & playground
       - "9090:9090"   # Prometheus metrics endpoint
+      - "3000:3000"   # Dashboard port
     entrypoint: ["vector"]
     command: ["--config", "/etc/vector/vector.yaml"]
 
