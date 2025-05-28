@@ -262,7 +262,7 @@ async function analyzeLogs() {
         const now = Math.floor(Date.now() / 1000);
         const response = await axiosInstance.get(prometheusUrl, {
             params: {
-                query: `nginx_nginx_requests_total[20s]`,
+                query: `nginx_nginx_requests_total[25s]`,
                 time: now
             }
         });
