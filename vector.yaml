@@ -104,9 +104,21 @@ transforms:
         "tags": .common_tags
       }
 
+  # Filter logs based on whitelist/blacklist conditions
+  filter_logs:
+    type: filter
+    inputs: [parse_nginx]
+    condition: |
+      endpoint_str = string!(.endpoint)
+      # Keep if NOT in whitelist AND matches blacklist
+      !(.ip == "163.22.17.153" || .ip == "127.0.0.1") && 
+      (.status_code != "200" || 
+       (contains(endpoint_str, "?") && 
+        !(contains(endpoint_str, "?page=") || contains(endpoint_str, "?date="))))
+
   convert_metrics:
     type: log_to_metric
-    inputs: [parse_nginx]
+    inputs: [filter_logs]
     metrics:
       - type: gauge
         field: bytes_sent

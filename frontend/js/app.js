@@ -1,9 +1,10 @@
 // 追蹤最後一次分析的時間戳記
 let lastAnalysisTimestamp = null;
 
-// 檢查新的分析結果
+// 檢查新的分析結果並更新歷史記錄
 async function checkNewResults() {
     try {
+        // 獲取最新結果
         const response = await fetch('/api/latest-analysis');
         const data = await response.json();
         
@@ -27,6 +28,8 @@ async function checkNewResults() {
             console.log('發現新的分析結果');
             lastAnalysisTimestamp = newTimestamp;
             updateUI(data);
+            // 更新歷史記錄
+            await updateHistory();
         }
     } catch (error) {
         console.error('檢查結果時發生錯誤:', error);
@@ -34,6 +37,61 @@ async function checkNewResults() {
             error: true,
             message: '無法連接到伺服器'
         });
+    }
+}
+
+// 獲取並顯示歷史記錄
+async function updateHistory() {
+    try {
+        const response = await fetch('/api/analysis-history?limit=10');
+        const history = await response.json();
+        
+        const historyDiv = document.getElementById('analysis-history');
+        if (!historyDiv) return;
+
+        historyDiv.innerHTML = `
+            <h2>歷史分析記錄</h2>
+            <div class="history-container">
+                ${history.map((record, index) => `
+                    <div class="history-item ${record.is_attack ? 'attack-detected' : 'no-attack'}">
+                        <div class="history-timestamp">
+                            ${new Date(record.timestamp).toLocaleString()}
+                        </div>
+                        <div class="history-content">
+                            <p><strong>是否檢測到攻擊:</strong> ${record.is_attack ? '是' : '否'}</p>
+                            <p><strong>需要進一步測試:</strong> ${record.need_test_command ? '是' : '否'}</p>
+                            ${record.shell_script ? `
+                                <div class="shell-script">
+                                    <strong>測試命令:</strong>
+                                    <pre>${record.shell_script}</pre>
+                                </div>
+                            ` : ''}
+                            <div class="response">
+                                <strong>詳細說明:</strong>
+                                <p>${record.general_response}</p>
+                            </div>
+                            <button onclick="showRawLogs(${index})" class="show-logs-btn">
+                                顯示原始日誌
+                            </button>
+                            <div id="raw-logs-${index}" class="raw-logs" style="display: none;">
+                                <pre>${record.raw_logs}</pre>
+                            </div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } catch (error) {
+        console.error('獲取歷史記錄失敗:', error);
+    }
+}
+
+// 顯示/隱藏原始日誌
+function showRawLogs(index) {
+    const logsDiv = document.getElementById(`raw-logs-${index}`);
+    if (logsDiv) {
+        const isVisible = logsDiv.style.display === 'block';
+        logsDiv.style.display = isVisible ? 'none' : 'block';
     }
 }
 
@@ -95,6 +153,8 @@ async function triggerAnalysis() {
         // 更新最後分析時間並更新UI
         lastAnalysisTimestamp = new Date(data.timestamp).getTime();
         updateUI(data);
+        // 更新歷史記錄
+        await updateHistory();
     } catch (error) {
         console.error('手動觸發請求失敗:', error);
     }
@@ -102,8 +162,9 @@ async function triggerAnalysis() {
 
 // 初始化函數
 function initialize() {
-    // 立即檢查一次結果
+    // 立即檢查一次結果並更新歷史記錄
     checkNewResults();
+    updateHistory();
 
     // 每3秒檢查一次新結果
     setInterval(checkNewResults, 3000);

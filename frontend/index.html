@@ -13,7 +13,7 @@
         }
 
         .container {
-            max-width: 800px;
+            max-width: 1200px;
             margin: 0 auto;
             background-color: white;
             padding: 20px;
@@ -91,6 +91,56 @@
             margin: 20px 0;
             color: #666;
         }
+
+        /* 歷史記錄樣式 */
+        .history-container {
+            margin-top: 20px;
+            border-top: 2px solid #eee;
+            padding-top: 20px;
+        }
+
+        .history-item {
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+
+        .history-timestamp {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .history-content {
+            margin-left: 10px;
+        }
+
+        .show-logs-btn {
+            background-color: #6c757d;
+            margin-top: 10px;
+            font-size: 14px;
+            padding: 5px 10px;
+        }
+
+        .show-logs-btn:hover {
+            background-color: #5a6268;
+        }
+
+        .raw-logs {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+
+        /* 分隔最新結果和歷史記錄 */
+        .section-divider {
+            border-top: 2px solid #eee;
+            margin: 30px 0;
+            padding-top: 20px;
+        }
     </style>
 </head>
 <body>
@@ -99,9 +149,15 @@
             <h1>日誌分析系統</h1>
             <button id="trigger-analysis">手動觸發分析</button>
         </div>
+        
+        <!-- 最新分析結果 -->
         <div id="analysis-result">
             <div class="loading">載入中...</div>
         </div>
+
+        <!-- 歷史記錄區域 -->
+        <div class="section-divider"></div>
+        <div id="analysis-history"></div>
     </div>
     <script src="/js/app.js"></script>
 </body>

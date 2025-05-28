@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
+import mysql from 'mysql2/promise';
 
 dotenv.config();
 
@@ -13,6 +14,80 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// MySQL 連線設定
+const pool = mysql.createPool({
+    host: '198.19.249.33',
+    user: 'aiioc',
+    password: 'aiioc',
+    database: 'aiioc',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
+
+// 初始化資料庫
+async function initializeDatabase() {
+    try {
+        const connection = await pool.getConnection();
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS analysis_results (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_attack BOOLEAN,
+                need_test_command BOOLEAN,
+                shell_script TEXT,
+                general_response TEXT,
+                raw_logs TEXT
+            )
+        `);
+        connection.release();
+        console.log('資料庫初始化完成');
+    } catch (error) {
+        console.error('資料庫初始化失敗:', error);
+    }
+}
+
+// 儲存分析結果到資料庫
+async function saveAnalysisResult(result, rawLogs) {
+    try {
+        const [rows] = await pool.execute(
+            'INSERT INTO analysis_results (is_attack, need_test_command, shell_script, general_response, raw_logs) VALUES (?, ?, ?, ?, ?)',
+            [
+                result.is_attack,
+                result.need_test_command,
+                result.shell_script || '',
+                result.general_response,
+                rawLogs
+            ]
+        );
+        console.log('分析結果已儲存到資料庫');
+        return rows.insertId;
+    } catch (error) {
+        console.error('儲存分析結果失敗:', error);
+        throw error;
+    }
+}
+
+// 獲取歷史分析結果
+async function getAnalysisHistory(limit = 10) {
+    try {
+        // Ensure limit is a number and convert to integer
+        const numericLimit = parseInt(limit, 10);
+        if (isNaN(numericLimit) || numericLimit < 1) {
+            throw new Error('Invalid limit value');
+        }
+        
+        const [rows] = await pool.execute(
+            'SELECT * FROM analysis_results ORDER BY timestamp DESC LIMIT 10',
+            [numericLimit]
+        );
+        return rows;
+    } catch (error) {
+        console.error('獲取歷史記錄失敗:', error);
+        throw error;
+    }
+}
 
 // Middleware
 app.use(cors());
@@ -32,12 +107,6 @@ const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
 		apiKey: "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"
 });
-
-// 儲存最新的分析結果
-let latestAnalysis = {
-    timestamp: null,
-    results: null
-};
 
 // 定義可疑的 User-Agent 模式
 const suspiciousUserAgents = {
@@ -112,103 +181,104 @@ async function analyzeLogs() {
         
         // 從 Prometheus 獲取數據
         const prometheusUrl = 'http://163.22.17.116:9091/api/v1/query';
+        const now = Math.floor(Date.now() / 1000);
         const response = await axios.get(prometheusUrl, {
             params: {
-                query: 'nginx_nginx_requests_total'
+                query: `nginx_nginx_requests_total[20s]`,
+                time: now
             }
         });
 
         if (!response.data?.data?.result) {
             throw new Error("無法從 Prometheus 獲取數據");
         }
-        console.log("res", response.data.data.result);
 
-        // 將 Prometheus 數據轉換為日誌格式
-        const logEntries = response.data.data.result.map(metric => {
-            const { method, endpoint, status_code, ip } = metric.metric;
-            // 構建類似 nginx 日誌格式的字符串
-            return `${ip} - - [${new Date().toLocaleString()}] "${method} ${endpoint} HTTP/1.1" ${status_code} - "-" "-" "-" "-"`;
-        }).join('\n');
-
-        if (!logEntries) {
-            throw new Error("沒有找到任何日誌條目");
-        }
-
-        const completion = await openai.chat.completions.create({
-            model: "meta-llama/llama-4-scout:free",
-            messages: [{
-                role: "user",
-                content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
-                    "is_attack": true/false, // 是否為攻擊行為
-                    "need_test_command": true/false, // 是否需要進一步測試命令確認
-                    "shell_script": "測試命令或空字串", // 若 need_test_command 為 true，必須提供測試命令
-                    "general_response": "攻擊說明" // 對此次攻擊的綜合描述
-                }
-                注意事項：
-                1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
-                分析以下 log：
-                ${logEntries}`
-            }]
+        // 收集所有請求
+        const requests = response.data.data.result.flatMap(series => {
+            const { method, endpoint, status_code, ip } = series.metric;
+            return series.values.map(([timestamp, value]) => {
+                const formattedTime = new Date(timestamp * 1000).toLocaleString();
+                return {
+                    logEntry: `${ip} - - [${formattedTime}] "${method} ${endpoint} HTTP/1.1" ${status_code} - "-" "-" "-" "-"`,
+                    timestamp: formattedTime,
+                    metadata: { method, endpoint, status_code, ip }
+                };
+            });
         });
 
-        console.log(`收到 API 回應`, completion.choices[0].message.content);
-
-        if (!completion.choices?.[0]?.message?.content) {
-            throw new Error("API 回傳的資料格式不正確");
+        if (requests.length === 0) {
+            console.log("此時間範圍內沒有新的請求");
+            return null;
         }
 
-        try {
-            const content = completion.choices[0].message.content;
-            if (!content) {
-                throw new Error("模型回應內容為空");
-            }
+        // 分析每個請求
+        const analysisResults = [];
+        for (const request of requests) {
+            try {
+                const completion = await openai.chat.completions.create({
+                    model: "meta-llama/llama-4-scout:free",
+                    messages: [{
+                        role: "user",
+                        content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
+                            "is_attack": true/false, // 是否為攻擊行為
+                            "need_test_command": true/false, // 是否需要進一步測試命令確認
+                            "shell_script": "測試命令或空字串", // 若 need_test_command 為 true，必須提供測試命令
+                            "general_response": "攻擊說明" // 對此次攻擊的綜合描述
+                        }
+                        注意事項：
+                        1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
+                        分析以下單一請求：
+                        ${request.logEntry}`
+                    }]
+                });
 
-            // 使用正則表達式提取 JSON 部分（支援陣列或物件格式）
-            const jsonMatch = content.match(/(\[|\{)[\s\S]*(\]|\})/);
-            if (jsonMatch) {
-                const jsonStr = jsonMatch[0];
-                const parsedResult = JSON.parse(jsonStr);
-
-                // 處理陣列或單一物件的結果
-                let analysisResult;
-                if (Array.isArray(parsedResult)) {
-                    // 如果是陣列，合併所有攻擊描述
-                    const isAnyAttack = parsedResult.some(item => item.is_attack);
-                    const needTestCommand = parsedResult.some(item => item.need_test_command);
-                    const shellScripts = parsedResult
-                        .filter(item => item.shell_script)
-                        .map(item => item.shell_script)
-                        .join('\n');
-                    const responses = parsedResult
-                        .map(item => item.general_response)
-                        .filter(response => response)
-                        .join('\n- ');
-
-                    analysisResult = {
-                        is_attack: isAnyAttack,
-                        need_test_command: needTestCommand,
-                        shell_script: shellScripts,
-                        general_response: responses ? `發現多個攻擊行為：\n- ${responses}` : "無攻擊行為"
-                    };
-                } else {
-                    // 如果是單一物件，直接使用
-                    analysisResult = parsedResult;
+                if (!completion.choices?.[0]?.message?.content) {
+                    throw new Error("API 回傳的資料格式不正確");
                 }
-                
-                // 更新最新分析结果
-                latestAnalysis = {
-                    timestamp: new Date(),
-                    results: analysisResult
-                };
 
-                return analysisResult;
-            } else {
-                throw new Error("無法從 API 回應中提取 JSON 資料");
+                const content = completion.choices[0].message.content;
+                const jsonMatch = content.match(/(\[|\{)[\s\S]*(\]|\})/);
+                if (jsonMatch) {
+                    const jsonStr = jsonMatch[0];
+                    const analysisResult = JSON.parse(jsonStr);
+                    
+                    // 加入請求的元數據
+                    analysisResult.timestamp = request.timestamp;
+                    analysisResult.request_metadata = request.metadata;
+                    
+                    // 儲存分析結果到資料庫
+                    await saveAnalysisResult(analysisResult, request.logEntry);
+                    
+                    analysisResults.push(analysisResult);
+                }
+            } catch (error) {
+                console.error(`分析請求失敗: ${request.logEntry}`, error);
+                // 繼續處理下一個請求
+                continue;
             }
-        } catch (err) {
-            console.error("JSON 解析失敗：", err);
-            throw new Error("JSON 解析失敗：" + err.message);
         }
+
+        // 如果有任何成功的分析結果，返回彙總結果
+        if (analysisResults.length > 0) {
+            const summary = {
+                is_attack: analysisResults.some(result => result.is_attack),
+                need_test_command: analysisResults.some(result => result.need_test_command),
+                shell_script: analysisResults
+                    .filter(result => result.shell_script)
+                    .map(result => result.shell_script)
+                    .join('\n'),
+                general_response: analysisResults
+                    .filter(result => result.is_attack)
+                    .map(result => {
+                        const metadata = result.request_metadata;
+                        return `${result.timestamp} - ${metadata.ip} 訪問 ${metadata.method} ${metadata.endpoint}: ${result.general_response}`;
+                    })
+                    .join('\n') || "無攻擊行為"
+            };
+            return summary;
+        }
+
+        return null;
     } catch (error) {
         console.error("分析日誌時發生錯誤：", error);
         throw error;
@@ -216,15 +286,46 @@ async function analyzeLogs() {
 }
 
 // API 端點
-app.get('/api/latest-analysis', (req, res) => {
-    if (!latestAnalysis.results) {
+app.get('/api/latest-analysis', async (req, res) => {
+    try {
+        const history = await getAnalysisHistory(1);
+        if (history.length === 0) {
+            res.json({
+                timestamp: new Date(),
+                results: null
+            });
+            return;
+        }
+        const latest = history[0];
         res.json({
-            timestamp: new Date(),
-            results: null
+            timestamp: latest.timestamp,
+            results: {
+                is_attack: latest.is_attack,
+                need_test_command: latest.need_test_command,
+                shell_script: latest.shell_script,
+                general_response: latest.general_response
+            }
         });
-        return;
+    } catch (error) {
+        res.status(500).json({
+            error: true,
+            message: error.message
+        });
     }
-    res.json(latestAnalysis);
+});
+
+// 獲取歷史分析結果的端點
+app.get('/api/analysis-history', async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 10;
+        const history = await getAnalysisHistory(limit);
+        res.json(history);
+    } catch (error) {
+        res.status(500).json({
+            error: true,
+            message: error.message
+        });
+    }
 });
 
 // 手動觸發分析
@@ -243,7 +344,6 @@ app.post('/api/trigger-analysis', async (req, res) => {
                 general_response: results.general_response || "無分析結果"
             }
         };
-        latestAnalysis = response;
         res.json(response);
     } catch (error) {
         console.error("觸發分析時發生錯誤：", error);
@@ -263,6 +363,9 @@ setInterval(async () => {
         console.error("定期分析任務失敗：", error);
     }
 }, 10000);
+
+// 初始化資料庫
+initializeDatabase().catch(console.error);
 
 // 處理所有其他路由，返回前端的 index.html
 app.get('*', (req, res) => {
