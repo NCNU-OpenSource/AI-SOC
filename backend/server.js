@@ -7,8 +7,15 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
 import mysql from 'mysql2/promise';
+import http from 'http';
 
 dotenv.config();
+
+// Create configured axios instance with keepAlive
+const axiosInstance = axios.create({
+    httpAgent: new http.Agent({ keepAlive: true }),
+    timeout: 10000 // 10 second timeout
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,15 +42,13 @@ const ipRequestCounts = new Map();
 // Function to get all active IPs from Prometheus
 async function getActiveIPs() {
     try {
-        const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
+        const response = await axiosInstance.get(`${PROMETHEUS_URL}/api/v1/query`, {
             params: {
-                // Get all unique IPs that have any metrics
                 query: 'count by (ip) (nginx_nginx_requests_total_no_filter)'
             }
         });
 
         if (response.data?.data?.result) {
-            // Extract unique IPs from the metrics
             const ips = response.data.data.result.map(result => result.metric.ip);
             return ips;
         }
@@ -57,10 +62,8 @@ async function getActiveIPs() {
 // Function to check request frequency for an IP
 async function checkRequestFrequency(ip) {
     try {
-        // Get all time series for this IP using sum_over_time
-        const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
+        const response = await axiosInstance.get(`${PROMETHEUS_URL}/api/v1/query`, {
             params: {
-                // Sum over time for each series, then sum all series together
                 query: `sum(sum_over_time(nginx_nginx_requests_total_no_filter{ip="${ip}"}[40s]))`
             }
         });
@@ -68,7 +71,7 @@ async function checkRequestFrequency(ip) {
         if (response.data?.data?.result?.[0]?.value) {
             const requestCount = parseFloat(response.data.data.result[0].value[1]);
             console.log(`Total requests for IP ${ip} in last 40s:`, requestCount);
-            return requestCount > 20; // Return true if more than 20 requests in 40s
+            return requestCount > 20;
         }
         else {
             console.log("No data found for IP:", ip, response.data);
@@ -257,7 +260,7 @@ async function analyzeLogs() {
         // 從 Prometheus 獲取數據
         const prometheusUrl = 'http://163.22.17.116:9091/api/v1/query';
         const now = Math.floor(Date.now() / 1000);
-        const response = await axios.get(prometheusUrl, {
+        const response = await axiosInstance.get(prometheusUrl, {
             params: {
                 query: `nginx_nginx_requests_total[20s]`,
                 time: now
