@@ -37,7 +37,7 @@ transforms:
         .timestamp,
         format: "%d/%b/%Y:%H:%M:%S %z"
       )
-      
+
       # 轉換數值字段
       .status_code = to_string!(.status_code)
       .bytes_sent = if .bytes_sent == "-" { 0.0 } else { to_float!(.bytes_sent) }
@@ -76,7 +76,7 @@ transforms:
         "endpoint": .endpoint,
         "ip": .ip
       }
-      
+
       # 請求計數指標
       .metric = {
         "name": "nginx_request",
@@ -85,7 +85,7 @@ transforms:
         "gauge": {"value": 1.0},
         "tags": .common_tags
       }
-      
+
       # 發送字節數指標
       .bytes_metric = {
         "name": "nginx_bytes_sent",
@@ -94,7 +94,7 @@ transforms:
         "gauge": {"value": .bytes_sent},
         "tags": .common_tags
       }
-      
+
       # 請求持續時間指標
       .duration_metric = {
         "name": "nginx_request_duration",
@@ -111,9 +111,9 @@ transforms:
     condition: |
       endpoint_str = string!(.endpoint)
       # Keep if NOT in whitelist AND matches blacklist
-      !(.ip == "163.22.17.153" || .ip == "127.0.0.1") && 
-      (.status_code != "200" || 
-       (contains(endpoint_str, "?") && 
+      !(.ip == "163.22.17.153" || .ip == "127.0.0.1") &&
+      (.status_code != "200" ||
+       (contains(endpoint_str, "?") &&
         !(contains(endpoint_str, "?page=") || contains(endpoint_str, "?date="))))
 
   convert_metrics:
@@ -130,7 +130,7 @@ transforms:
           endpoint: "{{endpoint}}"
           ip: "{{ip}}"
           raw_request: "{{raw_request}}"
-      
+
       - type: gauge
         field: request_time
         name: nginx_request_duration_seconds
@@ -141,10 +141,25 @@ transforms:
           endpoint: "{{endpoint}}"
           ip: "{{ip}}"
           raw_request: "{{raw_request}}"
-      
+
       - type: counter
         field: request_count
         name: nginx_requests_total
+        description: Total number of HTTP requests
+        tags:
+          method: "{{method}}"
+          status_code: "{{status_code}}"
+          endpoint: "{{endpoint}}"
+          ip: "{{ip}}"
+          raw_request: "{{raw_request}}"
+
+  convert_metrics_no_filter:
+    type: log_to_metric
+    inputs: [parse_nginx]
+    metrics:
+      - type: counter
+        field: request_count
+        name: nginx_requests_total_no_filter
         description: Total number of HTTP requests
         tags:
           method: "{{method}}"
@@ -177,7 +192,7 @@ sinks:
 
   prometheus_metrics:
     type: prometheus_exporter
-    inputs: [convert_metrics]
+    inputs: [convert_metrics, convert_metrics_no_filter]
     address: "0.0.0.0:9090"
     default_namespace: "nginx"
     buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]

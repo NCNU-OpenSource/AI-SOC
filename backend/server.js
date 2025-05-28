@@ -26,68 +26,143 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// 初始化資料庫
-async function initializeDatabase() {
-    try {
-        const connection = await pool.getConnection();
-        await connection.query(`
-            CREATE TABLE IF NOT EXISTS analysis_results (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_attack BOOLEAN,
-                need_test_command BOOLEAN,
-                shell_script TEXT,
-                general_response TEXT,
-                raw_logs TEXT
-            )
-        `);
-        connection.release();
-        console.log('資料庫初始化完成');
-    } catch (error) {
-        console.error('資料庫初始化失敗:', error);
-    }
-}
+// Prometheus setup
+const PROMETHEUS_URL = 'http://163.22.17.116:9091';
 
-// 儲存分析結果到資料庫
-async function saveAnalysisResult(result, rawLogs) {
-    try {
-        const [rows] = await pool.execute(
-            'INSERT INTO analysis_results (is_attack, need_test_command, shell_script, general_response, raw_logs) VALUES (?, ?, ?, ?, ?)',
-            [
-                result.is_attack,
-                result.need_test_command,
-                result.shell_script || '',
-                result.general_response,
-                rawLogs
-            ]
-        );
-        console.log('分析結果已儲存到資料庫');
-        return rows.insertId;
-    } catch (error) {
-        console.error('儲存分析結果失敗:', error);
-        throw error;
-    }
-}
+// Remove the manual IP tracking
+const ipRequestCounts = new Map();
 
-// 獲取歷史分析結果
-async function getAnalysisHistory(limit = 10) {
+// Function to get all active IPs from Prometheus
+async function getActiveIPs() {
     try {
-        // Ensure limit is a number and convert to integer
-        const numericLimit = parseInt(limit, 10);
-        if (isNaN(numericLimit) || numericLimit < 1) {
-            throw new Error('Invalid limit value');
+        const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
+            params: {
+                // Get all unique IPs that have any metrics
+                query: 'count by (ip) (nginx_nginx_requests_total_no_filter)'
+            }
+        });
+
+        if (response.data?.data?.result) {
+            // Extract unique IPs from the metrics
+            const ips = response.data.data.result.map(result => result.metric.ip);
+            return ips;
         }
-        
-        const [rows] = await pool.execute(
-            'SELECT * FROM analysis_results ORDER BY timestamp DESC LIMIT 10',
-            [numericLimit]
-        );
-        return rows;
+        return [];
     } catch (error) {
-        console.error('獲取歷史記錄失敗:', error);
-        throw error;
+        console.error('Error getting active IPs from Prometheus:', error);
+        return [];
     }
 }
+
+// Function to check request frequency for an IP
+async function checkRequestFrequency(ip) {
+    try {
+        // Get all time series for this IP using sum_over_time
+        const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
+            params: {
+                // Sum over time for each series, then sum all series together
+                query: `sum(sum_over_time(nginx_nginx_requests_total_no_filter{ip="${ip}"}[40s]))`
+            }
+        });
+
+        if (response.data?.data?.result?.[0]?.value) {
+            const requestCount = parseFloat(response.data.data.result[0].value[1]);
+            console.log(`Total requests for IP ${ip} in last 40s:`, requestCount);
+            return requestCount > 20; // Return true if more than 20 requests in 40s
+        }
+        else {
+            console.log("No data found for IP:", ip, response.data);
+        }
+        return false;
+    } catch (error) {
+        console.error('Error querying Prometheus:', error);
+        return false;
+    }
+}
+
+// Function to send request to OpenAI
+async function sendToOpenAI(request) {
+    try {
+        const completion = await openai.chat.completions.create({
+            model: "meta-llama/llama-4-scout:free",
+            messages: [{
+                role: "user",
+                content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
+                    "is_attack": true/false, // 是否為攻擊行為
+                    "need_test_command": true/false, // 是否需要進一步測試命令確認
+                    "shell_script": "測試命令或空字串", // 若 need_test_command 為 true，必須提供測試命令
+                    "general_response": "攻擊說明" // 對此次攻擊的綜合描述
+                }
+                注意事項：
+                1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
+                分析以下高頻率請求：
+                ${JSON.stringify(request, null, 2)}`
+            }]
+        });
+
+        if (!completion.choices?.[0]?.message?.content) {
+            throw new Error("API 回傳的資料格式不正確");
+        }
+
+        const content = completion.choices[0].message.content;
+        const jsonMatch = content.match(/(\[|\{)[\s\S]*(\]|\})/);
+        if (jsonMatch) {
+            const jsonStr = jsonMatch[0];
+            return JSON.parse(jsonStr);
+        }
+        throw new Error("無法解析回傳的 JSON 格式");
+    } catch (error) {
+        console.error('Error calling OpenAI:', error);
+        return {
+            is_attack: true,
+            need_test_command: false,
+            shell_script: '',
+            general_response: '分析失敗，但由於高頻率請求，仍標記為可疑行為'
+        };
+    }
+}
+
+// Periodic check for request frequency (every 20 seconds)
+setInterval(async () => {
+    console.log('Checking request frequencies from Prometheus metrics...');
+    try {
+        // Get all active IPs from Prometheus
+        const activeIPs = await getActiveIPs();
+        console.log('Active IPs found:', activeIPs);
+
+        // Check each IP for rate limiting
+        for (const ip of activeIPs) {
+            try {
+                const isOverLimit = await checkRequestFrequency(ip);
+                if (isOverLimit) {
+                    console.log(`High frequency detected for IP: ${ip}`);
+                    const requestData = {
+                        ip: ip,
+                        timestamp: new Date().toISOString(),
+                        alert_type: 'rate_limit_exceeded',
+                        threshold: '20 requests/40s'
+                    };
+
+                    // Send to OpenAI for analysis
+                    const analysis = await sendToOpenAI(requestData);
+                    console.log(`Rate limit analysis for IP ${ip}:`, analysis);
+                    
+                    // Save to database with the proper analysis result
+                    await saveAnalysisResult({
+                        is_attack: analysis.is_attack,
+                        need_test_command: analysis.need_test_command,
+                        shell_script: analysis.shell_script,
+                        general_response: analysis.general_response
+                    }, JSON.stringify(requestData));
+                }
+            } catch (error) {
+                console.error(`Error checking frequency for IP ${ip}:`, error);
+            }
+        }
+    } catch (error) {
+        console.error('Error in periodic check:', error);
+    }
+}, 20000); // Run every 20 seconds
 
 // Middleware
 app.use(cors());
@@ -105,7 +180,7 @@ if (!process.env.OPENAI_API_KEY) {
 // OpenAI 配置
 const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
-		apiKey: "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"
+		apiKey: "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"
 });
 
 // 定義可疑的 User-Agent 模式
@@ -363,6 +438,68 @@ setInterval(async () => {
         console.error("定期分析任務失敗：", error);
     }
 }, 10000);
+
+// 初始化資料庫
+async function initializeDatabase() {
+    try {
+        const connection = await pool.getConnection();
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS analysis_results (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_attack BOOLEAN,
+                need_test_command BOOLEAN,
+                shell_script TEXT,
+                general_response TEXT,
+                raw_logs TEXT
+            )
+        `);
+        connection.release();
+        console.log('資料庫初始化完成');
+    } catch (error) {
+        console.error('資料庫初始化失敗:', error);
+    }
+}
+
+// 儲存分析結果到資料庫
+async function saveAnalysisResult(result, rawLogs) {
+    try {
+        const [rows] = await pool.execute(
+            'INSERT INTO analysis_results (is_attack, need_test_command, shell_script, general_response, raw_logs) VALUES (?, ?, ?, ?, ?)',
+            [
+                result.is_attack,
+                result.need_test_command,
+                result.shell_script || '',
+                result.general_response,
+                rawLogs
+            ]
+        );
+        console.log('分析結果已儲存到資料庫');
+        return rows.insertId;
+    } catch (error) {
+        console.error('儲存分析結果失敗:', error);
+        throw error;
+    }
+}
+
+// 獲取歷史分析結果
+async function getAnalysisHistory(limit = 10) {
+    try {
+        // Ensure limit is a number and convert to integer
+        const numericLimit = parseInt(limit, 10);
+        if (isNaN(numericLimit) || numericLimit < 1) {
+            throw new Error('Invalid limit value');
+        }
+        
+        const [rows] = await pool.execute(
+            'SELECT * FROM analysis_results ORDER BY timestamp DESC LIMIT 10'
+        );
+        return rows;
+    } catch (error) {
+        console.error('獲取歷史記錄失敗:', error);
+        throw error;
+    }
+}
 
 // 初始化資料庫
 initializeDatabase().catch(console.error);
