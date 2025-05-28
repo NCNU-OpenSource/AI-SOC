@@ -3,9 +3,9 @@ import cors from 'cors';
 import OpenAI from 'openai';
 import fs from 'fs';
 import dotenv from 'dotenv';
-import cron from 'node-cron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import axios from 'axios';
 
 dotenv.config();
 
@@ -30,7 +30,7 @@ if (!process.env.OPENAI_API_KEY) {
 // OpenAI 配置
 const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
-    apiKey: "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"
+		apiKey: "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"
 });
 
 // 儲存最新的分析結果
@@ -109,12 +109,29 @@ function analyzeLogLine(line, lineNumber) {
 async function analyzeLogs() {
     try {
         console.log("開始分析日誌...");
-        // 讀取 log 檔案
-        const logContent = fs.readFileSync('attack_logs_apache_style.txt', 'utf8');
+        
+        // 從 Prometheus 獲取數據
+        const prometheusUrl = 'http://163.22.17.116:9091/api/v1/query';
+        const response = await axios.get(prometheusUrl, {
+            params: {
+                query: 'nginx_nginx_requests_total'
+            }
+        });
 
-        // 檢查檔案內容是否為空
-        if (!logContent.trim()) {
-            throw new Error("日誌檔案內容為空");
+        if (!response.data?.data?.result) {
+            throw new Error("無法從 Prometheus 獲取數據");
+        }
+        console.log("res", response.data.data.result);
+
+        // 將 Prometheus 數據轉換為日誌格式
+        const logEntries = response.data.data.result.map(metric => {
+            const { method, endpoint, status_code, ip } = metric.metric;
+            // 構建類似 nginx 日誌格式的字符串
+            return `${ip} - - [${new Date().toLocaleString()}] "${method} ${endpoint} HTTP/1.1" ${status_code} - "-" "-" "-" "-"`;
+        }).join('\n');
+
+        if (!logEntries) {
+            throw new Error("沒有找到任何日誌條目");
         }
 
         const completion = await openai.chat.completions.create({
@@ -130,11 +147,11 @@ async function analyzeLogs() {
                 注意事項：
                 1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
                 分析以下 log：
-                ${logContent}`
+                ${logEntries}`
             }]
         });
 
-        console.log(`收到 API 回應`);
+        console.log(`收到 API 回應`, completion.choices[0].message.content);
 
         if (!completion.choices?.[0]?.message?.content) {
             throw new Error("API 回傳的資料格式不正確");
@@ -237,15 +254,15 @@ app.post('/api/trigger-analysis', async (req, res) => {
     }
 });
 
-// 定期執行分析任務
-cron.schedule('*/5 * * * *', async () => {
+// 定期執行分析任務 (每10秒執行一次)
+setInterval(async () => {
     console.log('執行定期分析...');
     try {
         await analyzeLogs();
     } catch (error) {
         console.error("定期分析任務失敗：", error);
     }
-});
+}, 10000);
 
 // 處理所有其他路由，返回前端的 index.html
 app.get('*', (req, res) => {
