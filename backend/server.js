@@ -90,11 +90,11 @@ async function sendToOpenAI(request) {
             model: "meta-llama/llama-4-scout:free",
             messages: [{
                 role: "user",
-                content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
+                content: `請使用繁體中文直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
                     "is_attack": true/false, // 是否為攻擊行為
                     "need_test_command": true/false, // 是否需要進一步測試命令確認
                     "shell_script": "測試命令或空字串", // 若 need_test_command 為 true，必須提供測試命令
-                    "general_response": "攻擊說明" // 對此次攻擊的綜合描述
+                    "general_response": "攻擊說明" // 對此次攻擊的綜合描述，並提出如何避免此攻擊的建議
                 }
                 注意事項：
                 1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
@@ -297,11 +297,11 @@ async function analyzeLogs() {
                     model: "meta-llama/llama-4-scout:free",
                     messages: [{
                         role: "user",
-                        content: `請直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
+                        content: `請使用繁體中文直接回傳 JSON 格式的分析結果，不要加入任何其他說明或格式： {
                             "is_attack": true/false, // 是否為攻擊行為
                             "need_test_command": true/false, // 是否需要進一步測試命令確認
                             "shell_script": "測試命令或空字串", // 若 need_test_command 為 true，必須提供測試命令
-                            "general_response": "攻擊說明" // 對此次攻擊的綜合描述
+                            "general_response": "攻擊說明" // 對此次攻擊的綜合描述，並提出如何避免此攻擊的建議
                         }
                         注意事項：
                         1. 如果 need_test_command 為 true，必須在 shell_script 中提供相應的測試命令
