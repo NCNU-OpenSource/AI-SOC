@@ -2,6 +2,11 @@ api:
   enabled: true
   address: "0.0.0.0:8686"
 
+# Add global log schema configuration
+log_schema:
+  message_key: "message"
+  timestamp_key: "timestamp"
+
 sources:
   nginx_logs:
     type: file
@@ -15,20 +20,38 @@ transforms:
     type: remap
     inputs: [nginx_logs]
     source: |
-      . = parse_grok!(
+      # Store original message
+      .raw_request = .message
+
+      # Create a temporary variable for parsed data
+      parsed = parse_grok!(
         .message,
         "%{IPORHOST:ip} - - \\[%{HTTPDATE:timestamp}\\] \"%{WORD:method} %{NOTSPACE:endpoint} HTTP/%{NUMBER:http_version}\" %{NUMBER:status_code} %{NUMBER:bytes_sent} \"%{DATA:referrer}\" \"%{DATA:user_agent}\" \"%{DATA:request_time}\" \"%{DATA:upstream_addr}\""
       )
+
+      # Merge parsed data into the event
+      . = merge(., parsed)
+
+      # Parse timestamp
       .timestamp = parse_timestamp!(
         .timestamp,
         format: "%d/%b/%Y:%H:%M:%S %z"
       )
+      
       # 轉換數值字段
       .status_code = to_string!(.status_code)
       .bytes_sent = if .bytes_sent == "-" { 0.0 } else { to_float!(.bytes_sent) }
       .request_time = if .request_time == "-" { 0.0 } else { to_float!(.request_time) }
       # 添加一個計數器字段
       .request_count = 1.0
+
+  # Debug transform to verify raw request
+  debug_output:
+    type: remap
+    inputs: [parse_nginx]
+    source: |
+      # Log the event for debugging
+      ."debug_message" = "Raw Request Value: " + string!(.raw_request)
 
   # 1. 白名單：只放行指定 IP 的所有事件（不論 status）
   filter_whitelist:
@@ -94,6 +117,7 @@ transforms:
           status_code: "{{status_code}}"
           endpoint: "{{endpoint}}"
           ip: "{{ip}}"
+          raw_request: "{{raw_request}}"
       
       - type: gauge
         field: request_time
@@ -104,6 +128,7 @@ transforms:
           status_code: "{{status_code}}"
           endpoint: "{{endpoint}}"
           ip: "{{ip}}"
+          raw_request: "{{raw_request}}"
       
       - type: counter
         field: request_count
@@ -114,9 +139,16 @@ transforms:
           status_code: "{{status_code}}"
           endpoint: "{{endpoint}}"
           ip: "{{ip}}"
+          raw_request: "{{raw_request}}"
 
 sinks:
-  # 輸出解析後的原始日誌
+  # Add a debug console output
+  console_debug:
+    type: console
+    inputs: [debug_output]
+    encoding:
+      codec: json
+
   console_raw:
     type: console
     inputs: [parse_nginx]
@@ -124,7 +156,6 @@ sinks:
       codec: json
     target: stdout
 
-  # 輸出準備好的指標數據
   console_metrics:
     type: console
     inputs: [prepare_metrics]
