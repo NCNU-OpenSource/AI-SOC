@@ -277,7 +277,7 @@ AI-SOC 是一個結合 LLM 技術的安全運營中心系統，提供即時 Log 
 - 告警規則定義
 
 #### 配置步驟
-1. 把專案 clone 下來：`git clone https://github.com/Anna0131/AI-SOC.git`
+1. 把專案 clone 下來
 2. 安裝需要的套件：`npm intstall`
 4. 初始化資料庫（建 DB 、建使用者帳號並給權限）
     > 記得 **sudo vi /etc/mysql/mysql.conf.d/mysqld.cnf**， 把bind-address 改成0.0.0.0，資料庫才能給外面連
